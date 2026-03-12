@@ -56,12 +56,12 @@ def download_gdrive_folder(folder_id: str, output_dir: str, status_callback=None
     mp4_files = []
     if files:
         for f in files:
-            if isinstance(f, str) and f.endswith(".mp4"):
+            if isinstance(f, str) and f.lower().endswith((".mp4", ".mov")):
                 mp4_files.append(f)
 
     if not mp4_files:
         for f in os.listdir(output_dir):
-            if f.endswith(".mp4"):
+            if f.lower().endswith((".mp4", ".mov")):
                 mp4_files.append(os.path.join(output_dir, f))
 
     return sorted(mp4_files)
@@ -70,6 +70,7 @@ def download_gdrive_folder(folder_id: str, output_dir: str, status_callback=None
 def upload_to_fal(filepath: str) -> str:
     """Nahraje soubor na fal.ai storage a vrátí CDN URL."""
     filename = os.path.basename(filepath)
+    content_type = "video/quicktime" if filename.lower().endswith(".mov") else "video/mp4"
 
     init_resp = requests.post(
         "https://rest.alpha.fal.ai/storage/upload/initiate",
@@ -77,7 +78,7 @@ def upload_to_fal(filepath: str) -> str:
             "Authorization": f"Key {FAL_API_KEY}",
             "Content-Type": "application/json",
         },
-        json={"file_name": filename, "content_type": "video/mp4"},
+        json={"file_name": filename, "content_type": content_type},
     )
     init_resp.raise_for_status()
     data = init_resp.json()
@@ -85,7 +86,7 @@ def upload_to_fal(filepath: str) -> str:
     with open(filepath, "rb") as f:
         upload_resp = requests.put(
             data["upload_url"],
-            headers={"Content-Type": "video/mp4"},
+            headers={"Content-Type": content_type},
             data=f,
         )
         upload_resp.raise_for_status()
@@ -327,8 +328,8 @@ with col2:
 # Fallback: přímý upload
 with st.expander("Nebo nahraj videa přímo"):
     uploaded_files = st.file_uploader(
-        "Vyber MP4 soubory:",
-        type=["mp4"],
+        "Vyber video soubory:",
+        type=["mp4", "mov"],
         accept_multiple_files=True,
     )
 
@@ -362,7 +363,7 @@ if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
             progress.progress(10)
 
             if not video_files:
-                st.error("Ve složce nejsou žádné MP4 soubory. Zkontroluj odkaz a sdílení ('Kdokoli s odkazem').")
+                st.error("Ve složce nejsou žádná videa (MP4/MOV). Zkontroluj odkaz a sdílení ('Kdokoli s odkazem').")
                 st.stop()
         else:
             st.warning("Zadej Google Drive odkaz nebo nahraj videa.")
