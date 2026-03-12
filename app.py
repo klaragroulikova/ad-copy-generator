@@ -20,12 +20,15 @@ PROJEKTY = {
 
 # --- Pomocné funkce ---
 
-def load_system_prompt(projekt: str) -> str:
-    """Načte system prompt a doplní název projektu."""
-    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "ad_copy_system.txt")
+
+def load_prompt(filename: str, **kwargs) -> str:
+    """Načte prompt soubor a doplní proměnné."""
+    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", filename)
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
-    return prompt.replace("{projekt}", projekt)
+    for key, value in kwargs.items():
+        prompt = prompt.replace(f"{{{key}}}", str(value))
+    return prompt
 
 
 def extract_gdrive_folder_id(url: str) -> str | None:
@@ -133,15 +136,8 @@ def transcribe_video(fal_url: str) -> str:
     return "[Chyba: Prázdný přepis]"
 
 
-def generate_ad_copy(transcriptions: dict[str, str], projekt: str) -> str:
-    """Vygeneruje reklamní texty přes OpenClaw HTTP API."""
-    system_prompt = load_system_prompt(projekt)
-
-    user_content = "Zde jsou přepisy z reklamních reels videí:\n\n"
-    for filename, text in transcriptions.items():
-        user_content += f"### Video: {filename}\n{text}\n\n"
-    user_content += "Na základě těchto přepisů vygeneruj 5 textů a 8 titulků podle instrukcí."
-
+def call_openclaw(system_prompt: str, user_content: str) -> str:
+    """Zavolá OpenClaw HTTP API a vrátí odpověď."""
     resp = requests.post(
         f"{OPENCLAW_URL}/v1/chat/completions",
         headers={
@@ -154,11 +150,46 @@ def generate_ad_copy(transcriptions: dict[str, str], projekt: str) -> str:
                 {"role": "user", "content": user_content},
             ]
         },
-        timeout=120,
+        timeout=180,
     )
     resp.raise_for_status()
     data = resp.json()
     return data["choices"][0]["message"]["content"]
+
+
+def generate_ad_copy(transcriptions: dict[str, str], projekt: str) -> str:
+    """Vygeneruje reklamní texty přes OpenClaw — 1 text na video + 8 titulků."""
+    pocet = len(transcriptions)
+    system_prompt = load_prompt(
+        "ad_copy_system.txt",
+        projekt=projekt,
+        pocet_videi=pocet,
+    )
+
+    user_content = "Zde jsou přepisy z reklamních reels videí:\n\n"
+    for i, (filename, text) in enumerate(transcriptions.items(), 1):
+        user_content += f"### Video {i}: {filename}\n{text}\n\n"
+    user_content += f"Na základě těchto přepisů vygeneruj {pocet} textů (jeden ke každému videu) a 8 titulků podle instrukcí."
+
+    return call_openclaw(system_prompt, user_content)
+
+
+def correct_czech(raw_text: str) -> str:
+    """Opraví češtinu ve vygenerovaných textech (2. průchod)."""
+    system_prompt = load_prompt("czech_correction.txt")
+    return call_openclaw(system_prompt, raw_text)
+
+
+def edit_texts(current_texts: str, instruction: str, transcriptions_text: str) -> str:
+    """Upraví texty podle uživatelské instrukce."""
+    system_prompt = load_prompt("edit_instruction.txt")
+
+    user_content = f"## AKTUÁLNÍ TEXTY:\n\n{current_texts}\n\n"
+    if transcriptions_text:
+        user_content += f"## PŘEPISY VIDEÍ (pro kontext):\n\n{transcriptions_text}\n\n"
+    user_content += f"## INSTRUKCE K ÚPRAVĚ:\n\n{instruction}"
+
+    return call_openclaw(system_prompt, user_content)
 
 
 def parse_results(raw_text: str) -> tuple[list[str], list[str]]:
@@ -173,6 +204,8 @@ def parse_results(raw_text: str) -> tuple[list[str], list[str]]:
     for block in text_blocks:
         cleaned = block.strip()
         if cleaned and "---TEXTY---" not in cleaned:
+            # Odstraň oddělovač ---
+            cleaned = re.sub(r"\n?---\s*$", "", cleaned).strip()
             texty.append(cleaned)
 
     for line in titulek_section.strip().split("\n"):
@@ -182,6 +215,54 @@ def parse_results(raw_text: str) -> tuple[list[str], list[str]]:
             titulky.append(match.group(1).strip())
 
     return texty, titulky
+
+
+def format_transcriptions_text(transcriptions: dict[str, str]) -> str:
+    """Formátuje přepisy do čitelného textu."""
+    text = ""
+    for fname, transcript in transcriptions.items():
+        text += f"### {fname}\n{transcript}\n\n"
+    return text.strip()
+
+
+def build_raw_output(texty: list[str], titulky: list[str]) -> str:
+    """Sestaví raw text ve formátu ---TEXTY--- / ---TITULKY---."""
+    styles = [
+        "(krátký, bez emoji)",
+        "(delší, s emoji, příběhový)",
+        "(střední, bez emoji, direct response)",
+        "(krátký, s emoji, sociální důkaz)",
+        "(delší, edukační, mix emoji)",
+    ]
+    output = "---TEXTY---\n\n"
+    for i, text in enumerate(texty):
+        style = styles[i % len(styles)] if styles else ""
+        output += f"**TEXT {i+1}** {style}\n{text}\n\n"
+    output += "---TITULKY---\n\n"
+    for i, titulek in enumerate(titulky, 1):
+        output += f"{i}. {titulek}\n"
+    return output
+
+
+def build_download_output(
+    texty: list[str],
+    titulky: list[str],
+    transcriptions: dict[str, str] | None = None,
+) -> str:
+    """Sestaví kompletní výstup ke stažení."""
+    full_output = "REKLAMNÍ TEXTY\n" + "=" * 40 + "\n\n"
+    for i, text in enumerate(texty, 1):
+        full_output += f"TEXT {i}\n{'-' * 20}\n{text}\n\n---\n\n"
+    full_output += "\nTITULKY\n" + "=" * 40 + "\n\n"
+    for i, titulek in enumerate(titulky, 1):
+        full_output += f"{i}. {titulek}\n"
+
+    if transcriptions:
+        full_output += "\n\n" + "=" * 40 + "\nPŘEPISY VIDEÍ:\n" + "=" * 40 + "\n\n"
+        for fname, text in transcriptions.items():
+            full_output += f"### {fname}\n{text}\n\n"
+
+    return full_output
 
 
 # --- Streamlit UI ---
@@ -209,6 +290,20 @@ if not st.session_state.authenticated:
             st.error("Špatný PIN.")
     st.stop()
 
+# Inicializace session state
+if "texty" not in st.session_state:
+    st.session_state.texty = []
+if "titulky" not in st.session_state:
+    st.session_state.titulky = []
+if "transcriptions" not in st.session_state:
+    st.session_state.transcriptions = {}
+if "raw_result" not in st.session_state:
+    st.session_state.raw_result = ""
+if "edit_history" not in st.session_state:
+    st.session_state.edit_history = []
+if "generated" not in st.session_state:
+    st.session_state.generated = False
+
 # Hlavní formulář
 st.divider()
 
@@ -229,7 +324,7 @@ with st.expander("Nebo nahraj videa přímo"):
         accept_multiple_files=True,
     )
 
-# Spuštění
+# Spuštění generování
 if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
     progress = st.progress(0)
     status = st.empty()
@@ -246,7 +341,7 @@ if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
                 with open(path, "wb") as f:
                     f.write(uf.getbuffer())
                 video_files.append(path)
-            progress.progress(15)
+            progress.progress(10)
 
         elif gdrive_url:
             folder_id = extract_gdrive_folder_id(gdrive_url)
@@ -256,7 +351,7 @@ if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
 
             status.info("📥 Stahuji videa z Google Drive...")
             video_files = download_gdrive_folder(folder_id, tmp_dir)
-            progress.progress(15)
+            progress.progress(10)
 
             if not video_files:
                 st.error("Ve složce nejsou žádné MP4 soubory. Zkontroluj odkaz a sdílení ('Kdokoli s odkazem').")
@@ -275,7 +370,7 @@ if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
             status.info(f"☁️ Nahrávám {fname} ({i+1}/{len(video_files)})...")
             fal_url = upload_to_fal(vf)
             fal_urls[fname] = fal_url
-            progress.progress(15 + int(25 * (i + 1) / len(video_files)))
+            progress.progress(10 + int(20 * (i + 1) / len(video_files)))
 
         # Krok 3: Whisper přepis (paralelně)
         status.info("🎙️ Přepisuji videa do textu (může trvat 1-2 minuty)...")
@@ -292,75 +387,135 @@ if st.button("🚀 Generovat texty", type="primary", use_container_width=True):
                 fname, text = future.result()
                 transcriptions[fname] = text
                 done_count += 1
-                progress.progress(40 + int(35 * done_count / len(fal_urls)))
+                progress.progress(30 + int(25 * done_count / len(fal_urls)))
                 status.info(f"🎙️ Přepsáno {done_count}/{len(fal_urls)} videí...")
 
-        # Ukázat přepisy
-        with st.expander("📝 Přepisy videí (klikni pro zobrazení)"):
-            for fname, text in transcriptions.items():
-                st.markdown(f"**{fname}:**")
-                st.text(text)
-                st.divider()
+        # Uložit přepisy do session state
+        st.session_state.transcriptions = transcriptions
 
-        # Krok 4: Generovat texty
-        status.info("✍️ Generuji reklamní texty...")
-        progress.progress(80)
+        # Krok 4: Generovat texty (1 text na video + 8 titulků)
+        status.info(f"✍️ Generuji {len(transcriptions)} textů + 8 titulků...")
+        progress.progress(60)
 
         raw_result = generate_ad_copy(transcriptions, PROJEKTY[projekt])
-        progress.progress(95)
+        progress.progress(75)
 
-        # Krok 5: Zobrazit výsledky
-        status.success("✅ Hotovo!")
+        # Krok 5: Korekce češtiny (2. průchod)
+        status.info("🔍 Koriguju češtinu...")
+        corrected_result = correct_czech(raw_result)
+        progress.progress(90)
+
+        # Krok 6: Uložit výsledky
+        st.session_state.raw_result = corrected_result
+        texty, titulky = parse_results(corrected_result)
+        st.session_state.texty = texty
+        st.session_state.titulky = titulky
+        st.session_state.generated = True
+        st.session_state.edit_history = []
+
+        status.success(f"✅ Hotovo! {len(texty)} textů + {len(titulky)} titulků vygenerováno a zkorigováno.")
         progress.progress(100)
-
-        texty, titulky = parse_results(raw_result)
-
-        st.divider()
-        st.header("📝 Reklamní texty")
-
-        for i, text in enumerate(texty, 1):
-            st.subheader(f"Text {i}")
-            st.text_area(
-                f"text_{i}",
-                value=text,
-                height=150,
-                label_visibility="collapsed",
-                key=f"text_area_{i}",
-            )
-
-        st.divider()
-        st.header("🏷️ Titulky")
-
-        for i, titulek in enumerate(titulky, 1):
-            st.markdown(f"**{i}.** {titulek}  ({len(titulek)} znaků)")
-
-        # Download tlačítko
-        st.divider()
-        full_output = "REKLAMNÍ TEXTY\n" + "=" * 40 + "\n\n"
-        for i, text in enumerate(texty, 1):
-            full_output += f"TEXT {i}\n{'-' * 20}\n{text}\n\n"
-        full_output += "\nTITULKY\n" + "=" * 40 + "\n\n"
-        for i, titulek in enumerate(titulky, 1):
-            full_output += f"{i}. {titulek}\n"
-
-        # Přidej i raw output pro případ špatného parsování
-        full_output += "\n\n" + "=" * 40 + "\nKOMPLETNÍ RAW VÝSTUP:\n" + "=" * 40 + "\n\n"
-        full_output += raw_result
-
-        st.download_button(
-            "📥 Stáhnout vše jako .txt",
-            data=full_output,
-            file_name="reklamni-texty.txt",
-            mime="text/plain",
-            use_container_width=True,
-        )
 
     except Exception as e:
         st.error(f"Chyba: {e}")
         status.error(f"❌ Něco se pokazilo: {e}")
 
     finally:
-        # Úklid tmp souborů
         import shutil
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# --- Zobrazení výsledků (z session state) ---
+
+if st.session_state.generated and st.session_state.texty:
+    texty = st.session_state.texty
+    titulky = st.session_state.titulky
+    transcriptions = st.session_state.transcriptions
+
+    # Přepisy videí
+    if transcriptions:
+        st.divider()
+        with st.expander("🎙️ Přepisy videí (klikni pro zobrazení)"):
+            for fname, text in transcriptions.items():
+                st.markdown(f"**{fname}:**")
+                st.text(text)
+                st.divider()
+
+    # Reklamní texty
+    st.divider()
+    st.header(f"📝 Reklamní texty ({len(texty)})")
+
+    for i, text in enumerate(texty, 1):
+        st.subheader(f"Text {i}")
+        st.text_area(
+            f"text_{i}",
+            value=text,
+            height=150,
+            label_visibility="collapsed",
+            key=f"text_area_{i}_{len(st.session_state.edit_history)}",
+        )
+
+    # Titulky
+    st.divider()
+    st.header("🏷️ Titulky")
+
+    for i, titulek in enumerate(titulky, 1):
+        st.markdown(f"**{i}.** {titulek}  ({len(titulek)} znaků)")
+
+    # Download tlačítko
+    st.divider()
+    full_output = build_download_output(texty, titulky, transcriptions)
+
+    st.download_button(
+        "📥 Stáhnout vše jako .txt (včetně přepisů)",
+        data=full_output,
+        file_name="reklamni-texty.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    # --- Chat pro úpravy ---
+    st.divider()
+    st.header("✏️ Úpravy textů")
+    st.caption(
+        "Napiš instrukci a texty se automaticky upraví. "
+        "Např. *„přepiš text 4"*, *„přidej víc emoji"*, *„zkrať text 2"*"
+    )
+
+    # Historie úprav
+    for edit in st.session_state.edit_history:
+        st.chat_message("user").write(edit["instruction"])
+        st.chat_message("assistant").write("✅ Texty upraveny.")
+
+    # Input pro novou úpravu
+    edit_instruction = st.chat_input("Napiš co chceš upravit...")
+
+    if edit_instruction:
+        with st.spinner("✍️ Upravuji texty..."):
+            try:
+                # Sestav aktuální texty jako raw
+                current_raw = build_raw_output(texty, titulky)
+
+                # Přepisy pro kontext
+                trans_text = format_transcriptions_text(transcriptions) if transcriptions else ""
+
+                # Zavolej OpenClaw s instrukcí
+                edited_result = edit_texts(current_raw, edit_instruction, trans_text)
+
+                # Parsuj nové texty
+                new_texty, new_titulky = parse_results(edited_result)
+
+                if new_texty:
+                    st.session_state.texty = new_texty
+                if new_titulky:
+                    st.session_state.titulky = new_titulky
+                st.session_state.raw_result = edited_result
+                st.session_state.edit_history.append({
+                    "instruction": edit_instruction,
+                })
+
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Chyba při úpravě: {e}")
