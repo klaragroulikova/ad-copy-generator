@@ -8,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Konfigurace ---
 FAL_API_KEY = st.secrets["FAL_API_KEY"]
-OPENCLAW_URL = st.secrets["OPENCLAW_URL"]
-OPENCLAW_TOKEN = st.secrets["OPENCLAW_TOKEN"]
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 APP_PIN = st.secrets["PIN"]
+
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 PROJEKTY = {
     "Online psí škola": "Online psí škola",
@@ -136,29 +138,35 @@ def transcribe_video(fal_url: str) -> str:
     return "[Chyba: Prázdný přepis]"
 
 
-def call_openclaw(system_prompt: str, user_content: str) -> str:
-    """Zavolá OpenClaw HTTP API a vrátí odpověď."""
+def call_gemini(system_prompt: str, user_content: str) -> str:
+    """Zavolá Google Gemini API (ZDARMA) a vrátí odpověď."""
     resp = requests.post(
-        f"{OPENCLAW_URL}/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENCLAW_TOKEN}",
-            "Content-Type": "application/json",
-        },
+        f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+        headers={"Content-Type": "application/json"},
         json={
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ]
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_content}]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 4096,
+            }
         },
         timeout=180,
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def generate_ad_copy(transcriptions: dict[str, str], projekt: str) -> str:
-    """Vygeneruje reklamní texty přes OpenClaw — 1 text na video + 8 titulků."""
+    """Vygeneruje reklamní texty přes Gemini — 1 text na video + 8 titulků."""
     pocet = len(transcriptions)
     system_prompt = load_prompt(
         "ad_copy_system.txt",
@@ -171,13 +179,13 @@ def generate_ad_copy(transcriptions: dict[str, str], projekt: str) -> str:
         user_content += f"### Video {i}: {filename}\n{text}\n\n"
     user_content += f"Na základě těchto přepisů vygeneruj {pocet} textů (jeden ke každému videu) a 8 titulků podle instrukcí."
 
-    return call_openclaw(system_prompt, user_content)
+    return call_gemini(system_prompt, user_content)
 
 
 def correct_czech(raw_text: str) -> str:
     """Opraví češtinu ve vygenerovaných textech (2. průchod)."""
     system_prompt = load_prompt("czech_correction.txt")
-    return call_openclaw(system_prompt, raw_text)
+    return call_gemini(system_prompt, raw_text)
 
 
 def edit_texts(current_texts: str, instruction: str, transcriptions_text: str) -> str:
@@ -189,7 +197,7 @@ def edit_texts(current_texts: str, instruction: str, transcriptions_text: str) -
         user_content += f"## PŘEPISY VIDEÍ (pro kontext):\n\n{transcriptions_text}\n\n"
     user_content += f"## INSTRUKCE K ÚPRAVĚ:\n\n{instruction}"
 
-    return call_openclaw(system_prompt, user_content)
+    return call_gemini(system_prompt, user_content)
 
 
 def parse_results(raw_text: str) -> tuple[list[str], list[str]]:
@@ -500,7 +508,7 @@ if st.session_state.generated and st.session_state.texty:
                 # Přepisy pro kontext
                 trans_text = format_transcriptions_text(transcriptions) if transcriptions else ""
 
-                # Zavolej OpenClaw s instrukcí
+                # Zavolej Gemini s instrukcí
                 edited_result = edit_texts(current_raw, edit_instruction, trans_text)
 
                 # Parsuj nové texty
