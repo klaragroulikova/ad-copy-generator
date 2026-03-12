@@ -488,7 +488,7 @@ if st.session_state.generated and st.session_state.texty:
     st.header("✏️ Úpravy textů")
     st.caption(
         "Napiš instrukci a texty se automaticky upraví. "
-        "Např. *„přepiš text 4"*, *„přidej víc emoji"*, *„zkrať text 2"*"
+        'Např. *"přepiš text 4"*, *"přidej víc emoji"*, *"zkrať text 2"*'
     )
 
     # Historie úprav
